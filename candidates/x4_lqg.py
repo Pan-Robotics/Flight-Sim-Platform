@@ -48,6 +48,10 @@ def build():
         controller_name = 'LQR+I_full_state',
         log_dir         = 'logs',
         log_hz          = 50.0,
+        # Mission: end parked on wp3 = (0, 0, -3.0)
+        pass_criteria   = {'x_m':   (-0.5, 0.5),
+                           'y_m':   (-0.5, 0.5),
+                           'alt_m': (2.5, 3.5)},
     )
 
     waypoints = [
@@ -73,7 +77,8 @@ def build():
 # Plotting
 # ---------------------------------------------------------------------------
 
-def plot(X_hist, U_hist, config):
+def plot(X_hist, U_hist, config, show=True):
+    """Build figures; returns them. show=False for headless use."""
     dt = config.dt
     N  = X_hist.shape[0]
     t  = np.arange(N) * dt
@@ -115,4 +120,6 @@ def plot(X_hist, U_hist, config):
     axs[2].grid(True)
 
     plt.tight_layout()
-    plt.show()
+    if show:
+        plt.show()
+    return [fig]

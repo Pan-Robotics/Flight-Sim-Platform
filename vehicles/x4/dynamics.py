@@ -6,6 +6,7 @@ Implements the VehicleDynamics interface:
   .initial_state() -> np.ndarray (17,)
   .get_position(X) -> np.ndarray (3,)   NED position (north, east, down)
   .apply_constraints(X) -> np.ndarray   (normalises quat at X[6:10] + ground clamp)
+  .terminal_condition(t, X) -> str|None ('crash' / 'departure')
   .derivatives(t, X, U) -> np.ndarray
   .describe() -> dict
 
@@ -85,6 +86,21 @@ class X4Dynamics:
     def get_position(self, X):
         """NED position (north, east, down) [m]. X4 interleaves pos/vel."""
         return np.array([X[0], X[2], X[4]])
+
+    def terminal_condition(self, t, X):
+        """'crash' / 'departure' / None. Only armed once the vehicle has flown."""
+        alt = -X[4]
+        if alt > 1.0:
+            self._was_airborne = True
+        if not getattr(self, '_was_airborne', False):
+            return None
+        # Crash: back at ground level with a hard sink rate (zdot NED-down +)
+        if alt <= 0.05 and X[5] > 1.5:
+            return 'crash'
+        # Departure: tilted past 90 deg from vertical (cos(tilt) = 1-2(qx²+qy²))
+        if 1.0 - 2.0 * (X[7]**2 + X[8]**2) < 0.0:
+            return 'departure'
+        return None
 
     def apply_constraints(self, X):
         """Quaternion normalisation + ground clamp (z_NED >= 0 = on/below ground)."""

@@ -6,6 +6,8 @@ Implements the VehicleDynamics interface expected by sim.runner.SimRunner:
   .initial_state() -> np.ndarray
   .get_position(X) -> np.ndarray(3)   NED position (north, east, down)
   .apply_constraints(X) -> np.ndarray (quat normalise at X[9:13] + ground clamp)
+  .envelope_violations(X) -> list[str] (aero DB validity: |alpha|,|beta| <= 30 deg)
+  .terminal_condition(t, X) -> str|None ('crash' / 'departure')
   .derivatives(t, X, U) -> np.ndarray
   .describe() -> dict
 """
@@ -153,6 +155,49 @@ class SpearheadDynamics:
             if Xn[2] > 0.0:      # body-frame w (downward component)
                 Xn[2] = 0.0
         return Xn
+
+    # Aero DB is a 9th-order alpha polynomial fitted over ±30 deg (and clipped
+    # there in _aero_coeffs) — anything integrated past that edge is fiction.
+    ENV_ALPHA_MAX_DEG = 30.0
+    ENV_BETA_MAX_DEG  = 30.0
+    ENV_MIN_SPEED     = 3.0    # m/s — below this, aero forces are negligible
+                               # and alpha/beta are numerically meaningless
+
+    def envelope_violations(self, X):
+        """Non-empty list of reasons when outside the validated aero envelope."""
+        u, v, w = X[0:3]
+        V = np.sqrt(u*u + v*v + w*w)
+        if V < self.ENV_MIN_SPEED:
+            return []
+        alpha = np.degrees(np.arctan2(w, u))
+        beta  = np.degrees(np.arcsin(np.clip(v / V, -1.0, 1.0)))
+        out = []
+        if abs(alpha) > self.ENV_ALPHA_MAX_DEG:
+            out.append(f'alpha = {alpha:+.1f} deg outside +/-'
+                       f'{self.ENV_ALPHA_MAX_DEG:.0f} deg (V = {V:.1f} m/s)')
+        if abs(beta) > self.ENV_BETA_MAX_DEG:
+            out.append(f'beta  = {beta:+.1f} deg outside +/-'
+                       f'{self.ENV_BETA_MAX_DEG:.0f} deg (V = {V:.1f} m/s)')
+        return out
+
+    def terminal_condition(self, t, X):
+        """'crash' / 'departure' / None. Only armed once the vehicle has flown."""
+        alt = -X[8]
+        if alt > 1.0:
+            self._was_airborne = True
+        if not getattr(self, '_was_airborne', False):
+            return None
+        quat = normalize_quaternion(X[9:13])
+        # Crash: ground contact with a hard sink rate (inertial vz NED-down +)
+        if alt <= 0.05:
+            vz = rotate_body_to_inertial(X[0:3], quat)[2]
+            if vz > 2.0:
+                return 'crash'
+        # Departure: rolled or pitched past 85 deg while airborne
+        phi, theta, _ = quat_to_euler(quat)
+        if abs(phi) > np.radians(85.0) or abs(theta) > np.radians(85.0):
+            return 'departure'
+        return None
 
     def describe(self):
         p = self.params

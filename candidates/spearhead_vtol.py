@@ -28,6 +28,9 @@ def build():
         controller_name = 'VTOL_nested_PID',
         log_dir        = 'logs',
         log_hz         = 10.0,
+        # Mission intent: hold 10 m AGL while cruising at 54 m/s
+        pass_criteria  = {'alt_m':  (7.0, 13.0),
+                          'vx_ms': (49.0, 59.0)},
     )
 
     dynamics   = SpearheadDynamics()  # ADB data in vehicles/spearhead/ by default
@@ -39,11 +42,13 @@ def build():
 # Plotting (Spearhead-specific)
 # ---------------------------------------------------------------------------
 
-def plot(X_hist, U_hist, config):
+def plot(X_hist, U_hist, config, show=True):
+    """Build figures; returns them. show=False for headless use."""
     dt = config.dt
     tf = config.tf
     time = np.arange(0.0, tf + dt, dt)
-    N    = len(time)
+    N    = min(len(time), X_hist.shape[0])   # histories may be truncated by
+                                             # early termination
 
     T_SPINUP = config.phases.get('spinup',     5.0)
     T_HOVER  = config.phases.get('hover',      30.0)
@@ -131,4 +136,6 @@ def plot(X_hist, U_hist, config):
     ax3d.set_title('Spearhead UAV — 3D Trajectory')
     ax3d.legend(fontsize=8)
 
-    plt.show()
+    if show:
+        plt.show()
+    return [fig, fig3d]

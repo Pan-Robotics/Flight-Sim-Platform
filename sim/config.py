@@ -13,6 +13,17 @@ class SimConfig:
 
     references: open-ended dict of reference signals.  Convention varies by controller;
       typical keys: 'alt' (NED m), 'fwd_vel' (m/s), 'roll' (rad), 'yaw' (rad).
+
+    terminate_on: which detected events end the run early.
+      Keys: 'crash', 'departure' (from the vehicle's terminal_condition hook)
+      and 'envelope_exit' (from the vehicle's envelope_violations hook).
+      Divergence (non-finite state) always terminates — NaNs can't be integrated.
+
+    pass_criteria: mission pass/fail bounds, checked at end of run against the
+      final controller info dict plus the runner-computed keys 'north_m',
+      'east_m', 'down_m' (from dynamics.get_position).  Maps metric -> (lo, hi).
+      Empty dict -> verdict is COMPLETE/CRASHED/... with no PASS/FAIL judgement.
+      e.g. {'alt_m': (9.0, 11.0), 'vx_ms': (49.0, 59.0)}
     """
     dt:               float = 0.001
     tf:               float = 180.0
@@ -25,3 +36,7 @@ class SimConfig:
     controller_name:  str   = 'unknown'
     log_dir:          str   = 'logs'
     log_hz:           float = 10.0
+    terminate_on:     dict  = field(default_factory=lambda: {
+                                'crash': True, 'departure': True,
+                                'envelope_exit': False})
+    pass_criteria:    dict  = field(default_factory=dict)

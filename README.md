@@ -45,14 +45,36 @@ Logs are written to `sim_platform/logs/` (created automatically on first run).
 Run from inside `sim_platform/`:
 
 ```bash
-python run_candidate.py                           # default (Spearhead VTOL)
+python run_candidate.py                           # default (Spearhead VTOL), headless
 python run_candidate.py candidates.spearhead_vtol
 python run_candidate.py candidates.x4_lqg
+python run_candidate.py candidates.x4_lqg --show  # interactive plot windows
 ```
 
-Each run produces two timestamped files in `logs/`:
-- `flight_YYYYMMDD_HHMMSS.log` — human-readable header, phase events, per-phase statistics
-- `flight_YYYYMMDD_HHMMSS.csv` — time-series at `log_hz` Hz (all state and control columns)
+Runs are **headless by default**: figures are saved as PNGs next to the log
+files; pass `--show` to open interactive windows instead. The exit code is
+machine-readable: `0` = PASS/COMPLETE, `2` = FAIL, `3` = CRASHED/DEPARTED/DIVERGED.
+
+Each run produces timestamped files in `logs/`:
+- `flight_YYYYMMDD_HHMMSS.log` — human-readable header (incl. git commit + full
+  config for reproducibility), phase events, envelope events, per-phase
+  statistics, and a final `[VERDICT]` block
+- `flight_YYYYMMDD_HHMMSS.csv` — time-series at `log_hz` Hz (all state and
+  control columns, plus `data_valid` = 0 after any envelope exit)
+- `flight_YYYYMMDD_HHMMSS.json` — machine-readable run summary (verdict,
+  criteria results, envelope stats, end-state metrics) for automated sweeps
+
+### Tests
+
+```bash
+python -m unittest discover -s tests              # fast suite (~10 s)
+RUN_SLOW=1 python -m unittest discover -s tests   # + full-length missions
+```
+
+Golden-run regression tests pin the end state of short runs of both
+candidates; any change that shifts sim behavior fails the suite. After a
+*deliberate* behavior change, re-pin with
+`python tests/test_golden.py --repin` and commit the new numbers with it.
 
 ---
 
@@ -114,14 +136,30 @@ class MyDynamics:
     def describe(self) -> dict:
         """Key-value pairs written to the log header (mass, gains, etc.)."""
 
-    # Optional — called after every RK4 step:
-    def apply_constraints(self, X: np.ndarray) -> np.ndarray:
-        """Normalise quaternion, clamp ground contact, etc.
-        If absent, the runner applies a generic quaternion normalisation
-        at state indices [9:13] and a ground clamp at index [8]."""
-```
+    # --- Optional hooks (the runner never assumes state layout) ---
 
-**`apply_constraints` hook.** If your vehicle uses different state layout than Spearhead (e.g. quaternion at indices [6:10] like X4), you *must* supply this method so the runner doesn't corrupt your state vector.
+    def get_position(self, X: np.ndarray) -> np.ndarray:
+        """NED position (north, east, down) [m]. Enables position/altitude
+        reporting in the [END STATE] block and pass_criteria keys
+        north_m / east_m / down_m / alt_agl_m."""
+
+    def apply_constraints(self, X: np.ndarray) -> np.ndarray:
+        """Called after every RK4 step. Normalise quaternion, clamp ground
+        contact, etc. If absent, nothing is applied — constraints are
+        entirely the vehicle's responsibility."""
+
+    def envelope_violations(self, X: np.ndarray) -> list[str]:
+        """Non-empty list => the state is outside the model's validated
+        envelope (e.g. aero-table alpha/beta range). The runner logs the
+        first exit and marks all subsequent CSV rows data_valid=0.
+        Everything integrated past the envelope edge is fiction — this hook
+        is what keeps it from being mistaken for data."""
+
+    def terminal_condition(self, t: float, X: np.ndarray) -> str | None:
+        """Return 'crash' or 'departure' to end the run early (gated by
+        config.terminate_on). Divergence (non-finite state) always
+        terminates regardless."""
+```
 
 ### Controller
 
@@ -170,10 +208,25 @@ config = SimConfig(
     controller_name = 'my_ctrl',
     log_dir         = 'logs',   # relative to sim_platform/sim/
     log_hz          = 50.0,     # CSV decimation rate [Hz]
+    terminate_on    = {         # which detected events end the run early
+        'crash':         True,
+        'departure':     True,
+        'envelope_exit': False, # exits only mark data invalid by default
+    },
+    pass_criteria   = {         # mission verdict, checked at end of run
+        'alt_m': (9.0, 11.0),   # metric -> (lo, hi); metrics come from the
+        'vx_ms': (49.0, 59.0),  # final controller info dict + position keys
+    },
 )
 ```
 
 The `phases` dict is *documentation only* — the runner does not trigger anything based on it. Phase transitions are driven entirely by the string returned from `controller.step()`.
+
+**Verdicts.** Every run ends with a `[VERDICT]` block in the log and a JSON
+summary: `PASS`/`FAIL` (ran to `tf`, judged against `pass_criteria`),
+`COMPLETE` (ran to `tf`, no criteria configured), or `CRASHED`/`DEPARTED`/
+`DIVERGED` (ended early). `run_candidate.py` converts the verdict into its
+exit code, so sweeps and CI can consume results without parsing logs.
 
 ---
 

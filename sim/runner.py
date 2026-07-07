@@ -19,6 +19,15 @@ Interfaces (duck-typed):
                                             ground clamp — the runner calls it
                                             after each integration step and
                                             assumes no state layout of its own)
+    .envelope_violations(X) -> list[str]   (optional; non-empty list = state is
+                                            outside the model's validated
+                                            envelope, e.g. aero-table alpha/beta
+                                            range. The runner logs the first
+                                            exit and marks all subsequent CSV
+                                            rows data_valid=0.)
+    .terminal_condition(t, X) -> str|None  (optional; return 'crash' or
+                                            'departure' to end the run early —
+                                            gated by config.terminate_on)
 
   Controller:
     .step(t, X) -> (U: np.ndarray, info: dict)
@@ -26,12 +35,69 @@ Interfaces (duck-typed):
         info MAY contain any additional scalar fields for CSV logging
     .reset()
     .describe() -> dict   (for log header, e.g. PID gains)
+
+run() returns a SimResult. It unpacks like the legacy 4-tuple
+(X_hist, U_hist, log_path, csv_path) and additionally carries
+.verdict / .reason / .metrics / .t_end / .json_path.
 """
 import csv
 import datetime
+import json
 import os
+import platform
+import subprocess
+from dataclasses import dataclass, field, asdict
 
 import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Result object
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SimResult:
+    """Outcome of a simulation run.
+
+    verdict is one of:
+      PASS / FAIL   — ran to tf, judged against config.pass_criteria
+      COMPLETE      — ran to tf, no pass_criteria configured
+      CRASHED / DEPARTED — ended early by the vehicle's terminal_condition
+      DIVERGED      — non-finite state (always terminates)
+    """
+    x_hist:    np.ndarray
+    u_hist:    np.ndarray
+    log_path:  str
+    csv_path:  str
+    verdict:   str = 'COMPLETE'
+    reason:    str = ''
+    t_end:     float = 0.0
+    metrics:   dict = field(default_factory=dict)
+    json_path: str = ''
+
+    @property
+    def passed(self):
+        return self.verdict in ('PASS', 'COMPLETE')
+
+    def __iter__(self):
+        # Legacy unpacking: X_hist, U_hist, log_path, csv_path = runner.run()
+        return iter((self.x_hist, self.u_hist, self.log_path, self.csv_path))
+
+
+def _git_metadata():
+    """Commit hash + dirty flag of the repo this file lives in (best effort)."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        h = subprocess.run(['git', '-C', root, 'rev-parse', 'HEAD'],
+                           capture_output=True, text=True, timeout=3)
+        if h.returncode != 0:
+            return {'commit': 'unknown (not a git repo)', 'dirty': None}
+        d = subprocess.run(['git', '-C', root, 'status', '--porcelain'],
+                           capture_output=True, text=True, timeout=3)
+        return {'commit': h.stdout.strip(),
+                'dirty': bool(d.stdout.strip()) if d.returncode == 0 else None}
+    except (OSError, subprocess.TimeoutExpired):
+        return {'commit': 'unknown (git unavailable)', 'dirty': None}
 
 
 class SimRunner:
@@ -75,6 +141,18 @@ class SimRunner:
         _extra_cols = []
         log_rows    = []
 
+        # Envelope validity: latched False on first exit — everything after an
+        # envelope exit is model fiction and stays flagged even on re-entry.
+        _has_envelope   = hasattr(dyn, 'envelope_violations')
+        _data_valid     = True
+        _env_first_exit = None
+        _env_valid_steps = 0
+
+        # Early-termination outcome: (verdict, reason) or None
+        terminated = None
+        last_info  = {}
+        t_end      = time_arr[-1]
+
         # Write log header
         self._write_header(log_path, cfg, dyn, ctl)
 
@@ -87,6 +165,7 @@ class SimRunner:
             # Controller step
             U, info = ctl.step(t, X)
             U_hist[i, :] = U
+            last_info = info
 
             phase = info.get('phase', 'unknown')
 
@@ -96,7 +175,26 @@ class SimRunner:
                 _csv_cols   = (['time_s', 'phase']
                                + dyn.state_names
                                + dyn.control_names
-                               + _extra_cols)
+                               + _extra_cols
+                               + ['data_valid'])
+
+            # Envelope validity check (vehicle-defined)
+            if _has_envelope and _data_valid:
+                _viol = dyn.envelope_violations(X)
+                if _viol:
+                    _data_valid     = False
+                    _env_first_exit = t
+                    with open(log_path, 'a') as lf:
+                        lf.write(f'  t={t:8.3f}s  ENVELOPE EXIT — data '
+                                 f'invalid from here on\n')
+                        for v in _viol:
+                            lf.write(f'      {v}\n')
+                    if cfg.terminate_on.get('envelope_exit', False):
+                        terminated = ('DEPARTED',
+                                      f'envelope exit at t={t:.3f}s: '
+                                      + '; '.join(_viol))
+            if _data_valid:
+                _env_valid_steps += 1
 
             # Accumulate per-phase stats
             if phase not in _phase_stats:
@@ -122,7 +220,14 @@ class SimRunner:
                 for k in _extra_cols:
                     v = info.get(k, '')
                     row.append(f'{v:.5g}' if isinstance(v, (int, float)) else str(v))
+                row.append('1' if _data_valid else '0')
                 log_rows.append(row)
+
+            # Early termination decided on this step's checks
+            if terminated is not None:
+                t_end = t
+                N = i + 1
+                break
 
             # RK4
             k1 = dyn.derivatives(t,            X,            U)
@@ -137,20 +242,108 @@ class SimRunner:
             if hasattr(dyn, 'apply_constraints'):
                 X = dyn.apply_constraints(X)
 
+            # Divergence always terminates — NaN/Inf cannot be integrated.
+            if not np.all(np.isfinite(X)):
+                bad = [dyn.state_names[j] for j in
+                       np.where(~np.isfinite(X))[0][:6]]
+                terminated = ('DIVERGED',
+                              f'non-finite state at t={t + dt:.3f}s '
+                              f'({", ".join(bad)})')
+                t_end = t + dt
+                N = i + 1
+                break
+
+            # Vehicle-detected terminal condition (crash / departure)
+            if hasattr(dyn, 'terminal_condition'):
+                tc = dyn.terminal_condition(t + dt, X)
+                if tc is not None and cfg.terminate_on.get(tc, True):
+                    verdict_code = 'CRASHED' if tc == 'crash' else 'DEPARTED'
+                    terminated = (verdict_code,
+                                  f'{tc} detected at t={t + dt:.3f}s')
+                    t_end = t + dt
+                    N = i + 1
+                    break
+
         # ----------------------------------------------------------------
-        # Flush CSV and write summary
+        # Truncate histories if the run ended early
+        # ----------------------------------------------------------------
+        X_hist = X_hist[:N]
+        U_hist = U_hist[:N]
+
+        # ----------------------------------------------------------------
+        # Verdict
+        # ----------------------------------------------------------------
+        # Final metrics: controller info + runner-computed position keys.
+        final_metrics = {k: v for k, v in last_info.items()
+                         if isinstance(v, (int, float, np.integer, np.floating))}
+        if hasattr(dyn, 'get_position'):
+            n_p, e_p, d_p = (float(v) for v in dyn.get_position(X))
+            final_metrics.update(north_m=n_p, east_m=e_p, down_m=d_p,
+                                 alt_agl_m=-d_p)
+
+        criteria_results = []
+        if terminated is not None:
+            verdict, reason = terminated
+        elif cfg.pass_criteria:
+            fails = []
+            for key, (lo, hi) in cfg.pass_criteria.items():
+                val = final_metrics.get(key)
+                ok  = val is not None and lo <= val <= hi
+                criteria_results.append(
+                    {'metric': key, 'lo': lo, 'hi': hi,
+                     'value': None if val is None else float(val),
+                     'pass': bool(ok)})
+                if not ok:
+                    fails.append(f'{key}={val if val is not None else "missing"}'
+                                 f' not in [{lo}, {hi}]')
+            verdict = 'PASS' if not fails else 'FAIL'
+            reason  = 'all criteria met' if not fails else '; '.join(fails)
+        else:
+            verdict, reason = 'COMPLETE', 'reached tf (no pass_criteria set)'
+
+        env_stats = None
+        if _has_envelope:
+            env_stats = {'first_exit_t': _env_first_exit,
+                         'valid_fraction': round(_env_valid_steps / N, 4)}
+
+        # ----------------------------------------------------------------
+        # Flush CSV, write summary, write machine-readable JSON verdict
         # ----------------------------------------------------------------
         with open(csv_path, 'w', newline='') as cf:
             writer = csv.writer(cf)
             writer.writerow(_csv_cols or [])
             writer.writerows(log_rows)
 
-        self._write_summary(log_path, csv_path, X, _phase_stats, tf)
+        self._write_summary(log_path, csv_path, X, _phase_stats, t_end,
+                            verdict, reason, criteria_results, env_stats)
+
+        json_path = os.path.splitext(log_path)[0] + '.json'
+        with open(json_path, 'w') as jf:
+            json.dump({
+                'schema':      'flight-sim-platform/run-summary/v1',
+                'generated':   datetime.datetime.now().isoformat(),
+                'vehicle':     cfg.vehicle_name,
+                'controller':  cfg.controller_name,
+                'git':         _git_metadata(),
+                'python':      platform.python_version(),
+                'numpy':       np.__version__,
+                'config':      {k: v for k, v in asdict(cfg).items()},
+                'verdict':     verdict,
+                'reason':      reason,
+                't_end':       float(t_end),
+                'criteria':    criteria_results,
+                'envelope':    env_stats,
+                'metrics':     {k: float(v) for k, v in final_metrics.items()},
+                'files':       {'log': log_path, 'csv': csv_path},
+            }, jf, indent=2)
 
         print(f'[LOG] {log_path}')
         print(f'[CSV] {csv_path}')
+        print(f'[VERDICT] {verdict} — {reason}')
 
-        return X_hist, U_hist, log_path, csv_path
+        return SimResult(X_hist, U_hist, log_path, csv_path,
+                         verdict=verdict, reason=reason, t_end=float(t_end),
+                         metrics=final_metrics, json_path=json_path)
 
     # ------------------------------------------------------------------
     def _write_header(self, log_path, cfg, dyn, ctl):
@@ -160,12 +353,17 @@ class SimRunner:
             lf.write(f'  Generated : {datetime.datetime.now().isoformat()}\n')
             lf.write('=' * 72 + '\n\n')
 
+            git = _git_metadata()
+            lf.write('[REPRODUCIBILITY]\n')
+            lf.write(f'  git commit   = {git["commit"]}'
+                     + ('  (DIRTY working tree)' if git['dirty'] else '') + '\n')
+            lf.write(f'  python       = {platform.python_version()}\n')
+            lf.write(f'  numpy        = {np.__version__}\n\n')
+
             lf.write('[SIMULATION PARAMETERS]\n')
-            lf.write(f'  dt           = {cfg.dt} s\n')
-            lf.write(f'  tf           = {cfg.tf} s\n')
-            lf.write(f'  phases       = {cfg.phases}\n')
-            lf.write(f'  references   = {cfg.references}\n')
-            lf.write(f'  log_hz       = {cfg.log_hz} Hz\n\n')
+            for k, v in asdict(cfg).items():
+                lf.write(f'  {k:<14} = {v}\n')
+            lf.write('\n')
 
             lf.write('[VEHICLE]\n')
             for k, v in dyn.describe().items():
@@ -180,7 +378,8 @@ class SimRunner:
             lf.write('[PHASE EVENTS]\n')
 
     # ------------------------------------------------------------------
-    def _write_summary(self, log_path, csv_path, X_final, phase_stats, tf):
+    def _write_summary(self, log_path, csv_path, X_final, phase_stats, t_end,
+                       verdict, reason, criteria_results, env_stats):
         with open(log_path, 'a') as lf:
             lf.write('\n[PHASE PERFORMANCE SUMMARY]\n')
             for phase, rows in phase_stats.items():
@@ -199,12 +398,29 @@ class SimRunner:
                                  f'max={np.max(vals):10.4g}\n')
 
             lf.write('\n[END STATE]\n')
-            lf.write(f'  t         = {tf:.1f} s\n')
+            lf.write(f'  t         = {t_end:.1f} s\n')
             # Ask the vehicle for its NED position — never assume state layout.
             if hasattr(self.dynamics, 'get_position'):
                 n_pos, e_pos, d_pos = self.dynamics.get_position(X_final)
                 lf.write(f'  pos (NED) = ({n_pos:.1f}, {e_pos:.1f}, {d_pos:.1f}) m\n')
                 lf.write(f'  alt AGL   = {-d_pos:.2f} m\n')
+
+            if env_stats is not None:
+                lf.write('\n[ENVELOPE]\n')
+                if env_stats['first_exit_t'] is None:
+                    lf.write('  within validated envelope for entire run\n')
+                else:
+                    lf.write(f'  FIRST EXIT at t = {env_stats["first_exit_t"]:.3f} s '
+                             f'— data after this point is outside the validated '
+                             f'model envelope\n')
+                lf.write(f'  valid fraction  = {env_stats["valid_fraction"]*100:.1f}%\n')
+
+            lf.write('\n[VERDICT]\n')
+            lf.write(f'  {verdict} — {reason}\n')
+            for c in criteria_results:
+                mark = 'PASS' if c['pass'] else 'FAIL'
+                lf.write(f'    [{mark}] {c["metric"]:<16} = {c["value"]}'
+                         f'   (required {c["lo"]} .. {c["hi"]})\n')
 
             lf.write(f'\n[OUTPUT FILES]\n')
             lf.write(f'  Log : {log_path}\n')
