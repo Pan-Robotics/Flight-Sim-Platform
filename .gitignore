@@ -1,0 +1,6 @@
+# Simulation run outputs
+logs/
+
+# Python
+__pycache__/
+*.py[cod]

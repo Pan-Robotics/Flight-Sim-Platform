@@ -21,11 +21,11 @@ from controllers.x4_lqg.controller import X4LQGController
 
 
 # ---------------------------------------------------------------------------
-# Path to LQG gain matrices (relative to this file)
+# Path to LQG gain matrices (vendored with the controller, relative to this file)
 # ---------------------------------------------------------------------------
 _DATA = os.path.normpath(
     os.path.join(os.path.dirname(__file__),
-                 '..', '..', 'x4_quadcopter', 'data'))
+                 '..', 'controllers', 'x4_lqg', 'data'))
 
 
 def build():
