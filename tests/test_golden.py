@@ -30,10 +30,12 @@ GOLDEN = {
         'x_norm':    3999.327179,
         'verdict':   'COMPLETE',
     },
+    # Re-pinned 2026-07-07 with the quaternion rotation-helper convention fix
+    # (see sim/quaternion.py header) — deliberate physics correction.
     'candidates.spearhead_vtol': {
         'tf': 8.0,
-        'final_pos': [0.005297790066, 0.0001031872852, -2.708252135],
-        'x_norm':    13229.44964,
+        'final_pos': [-0.002403053133, 8.781675157e-05, -2.708252998],
+        'x_norm':    13229.4487,
         'verdict':   'COMPLETE',
     },
 }

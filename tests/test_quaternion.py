@@ -60,21 +60,32 @@ class TestQuaternion(unittest.TestCase):
         qd = quat_kinematics(q, 0.3, -0.5, 0.7)
         self.assertAlmostEqual(float(np.dot(q, qd)), 0.0, places=12)
 
-    @unittest.expectedFailure
     def test_yaw_90_maps_north_to_east(self):
-        # KNOWN ISSUE: quat_kinematics and quat_to_euler follow the standard
-        # body->NED convention, but rotate_body_to_inertial /
-        # rotate_inertial_to_body are inverted relative to it (they return the
-        # conjugate rotation). The Spearhead model uses the swapped pair
-        # self-consistently, so it flies, but its world-frame trajectory is
-        # mirrored w.r.t. its reported attitude. X4 hand-codes its rotations
-        # (standard) and is unaffected. Fixing this flips Spearhead
-        # trajectories, so it must land as its own golden-gated change.
+        # Guards the body->NED quaternion convention: the rotate_* helpers
+        # must agree in direction with quat_kinematics and quat_to_euler.
+        # (They were crossed before 2026-07 — see sim/quaternion.py header.)
         c = np.cos(np.pi / 4)
-        q = np.array([c, 0, 0, c])          # body yawed +90 deg
+        q = np.array([c, 0, 0, c])          # body yawed +90 deg (nose East)
         # body x-axis expressed in inertial frame -> East
         v_i = rotate_body_to_inertial(np.array([1.0, 0, 0]), q)
         np.testing.assert_allclose(v_i, [0, 1, 0], atol=1e-12)
+        # and North expressed in the body frame -> -y (left wing)
+        v_b = rotate_inertial_to_body(np.array([1.0, 0, 0]), q)
+        np.testing.assert_allclose(v_b, [0, -1, 0], atol=1e-12)
+
+    def test_kinematics_euler_helpers_agree_in_direction(self):
+        # Integrate a pure yaw rate and require euler extraction and the
+        # rotation helper to report the SAME heading — the invariant that was
+        # broken by the crossed helpers.
+        q = np.array([1.0, 0, 0, 0])
+        dt = 1e-4
+        for _ in range(5000):                       # r = +1 rad/s for 0.5 s
+            q = normalize_quaternion(q + dt * quat_kinematics(q, 0, 0, 1.0))
+        psi_euler = quat_to_euler(q)[2]
+        nose_i = rotate_body_to_inertial(np.array([1.0, 0, 0]), q)
+        psi_helper = np.arctan2(nose_i[1], nose_i[0])
+        self.assertAlmostEqual(psi_euler, psi_helper, places=6)
+        self.assertGreater(psi_euler, 0.4)          # ~+0.5 rad, right-handed
 
 
 if __name__ == '__main__':

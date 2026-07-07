@@ -1,4 +1,18 @@
-"""Quaternion utilities shared across vehicle models."""
+"""Quaternion utilities shared across vehicle models.
+
+Convention: q = [q0, q1, q2, q3] (Hamilton, scalar-first) is the body->NED
+attitude quaternion — v_NED = q (x) v_body (x) q*.  This matches
+quat_kinematics (qdot = 0.5 q (x) [0, omega_body]) and quat_to_euler
+(standard ZYX extraction), and the hand-coded rotation terms in the X4 model.
+
+History: prior to 2026-07 the two rotate_* helpers implemented the opposite
+(NED->body) convention while keeping these names, i.e. their sandwich
+products were crossed relative to the kinematics.  The Spearhead model used
+the crossed pair self-consistently, which made its world-frame response
+correspond to the conjugate of its reported attitude.  Fixed by swapping the
+implementations; regression-gated by tests/test_quaternion.py and the golden
+runs in tests/test_golden.py.
+"""
 import numpy as np
 
 
@@ -46,12 +60,14 @@ def quat_multiply(qA, qB):
 
 
 def rotate_inertial_to_body(v, q):
-    wv = np.array([0.0, v[0], v[1], v[2]])
-    qc = np.array([q[0], -q[1], -q[2], -q[3]])
-    return quat_multiply(quat_multiply(q, wv), qc)[1:]
-
-
-def rotate_body_to_inertial(v, q):
+    """v_body = q* (x) v_NED (x) q   (q is the body->NED attitude quaternion)."""
     wv = np.array([0.0, v[0], v[1], v[2]])
     qc = np.array([q[0], -q[1], -q[2], -q[3]])
     return quat_multiply(quat_multiply(qc, wv), q)[1:]
+
+
+def rotate_body_to_inertial(v, q):
+    """v_NED = q (x) v_body (x) q*   (q is the body->NED attitude quaternion)."""
+    wv = np.array([0.0, v[0], v[1], v[2]])
+    qc = np.array([q[0], -q[1], -q[2], -q[3]])
+    return quat_multiply(quat_multiply(q, wv), qc)[1:]
