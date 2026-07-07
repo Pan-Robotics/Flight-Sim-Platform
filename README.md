@@ -52,7 +52,11 @@ Logs are written to `logs/` at the repo root (created automatically, gitignored)
 
 ## Quick Start
 
-Run from the repo root:
+Install dependencies, then run from the repo root:
+
+```bash
+pip install -r requirements.txt
+```
 
 ```bash
 python run_candidate.py                           # default (Spearhead VTOL), headless

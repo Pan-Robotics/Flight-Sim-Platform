@@ -1,0 +1,9 @@
+# Flight-Sim-Platform dependencies
+#   pip install -r requirements.txt
+# Floors reflect the oldest versions verified against the test suite;
+# anything newer is expected to work.
+
+numpy>=1.24        # dynamics, integration, everything
+matplotlib>=3.6    # candidate plot() figures (Agg backend works headless)
+scipy>=1.10        # sim/analysis.py trim solver (least_squares)
+PyYAML>=6.0        # run_sweep.py YAML specs, run_candidate.py --set parsing
