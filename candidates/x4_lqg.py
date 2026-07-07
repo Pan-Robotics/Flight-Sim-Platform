@@ -21,11 +21,12 @@ from controllers.x4_lqg.controller import X4LQGController
 
 
 # ---------------------------------------------------------------------------
-# Path to LQG gain matrices (vendored with the controller, relative to this file)
+# Path to the x4 plant model + tuned LQG gains, vendored with the x4 vehicle
+# (relative to this file)
 # ---------------------------------------------------------------------------
 _DATA = os.path.normpath(
     os.path.join(os.path.dirname(__file__),
-                 '..', 'controllers', 'x4_lqg', 'data'))
+                 '..', 'vehicles', 'x4', 'data'))
 
 
 def build():
