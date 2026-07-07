@@ -5,6 +5,7 @@ Implements the VehicleDynamics interface expected by sim.runner.SimRunner:
   .state_dim, .control_dim, .state_names, .control_names
   .initial_state() -> np.ndarray
   .get_position(X) -> np.ndarray(3)   NED position (north, east, down)
+  .apply_constraints(X) -> np.ndarray (quat normalise at X[9:13] + ground clamp)
   .derivatives(t, X, U) -> np.ndarray
   .describe() -> dict
 """
@@ -52,9 +53,16 @@ def _aero_coeffs(alpha_deg, beta_deg, adb, beta_breaks):
     alpha_deg = np.clip(alpha_deg, -30.0, 30.0)
     beta_deg  = np.clip(beta_deg,  -30.0, 30.0)
     alpha_rad = np.radians(alpha_deg)
-    i         = np.argmin(np.abs(beta_breaks - beta_deg))
     apoly     = np.array([alpha_rad**p for p in range(9)])
-    return apoly @ adb[i, :, :]
+    # Linearly interpolate the aero table across the two bracketing beta
+    # breakpoints (was nearest-neighbour, which stepped at each breakpoint).
+    j  = int(np.clip(np.searchsorted(beta_breaks, beta_deg),
+                     1, len(beta_breaks) - 1))
+    b0, b1 = beta_breaks[j - 1], beta_breaks[j]
+    w  = 0.0 if b1 == b0 else (beta_deg - b0) / (b1 - b0)
+    c0 = apoly @ adb[j - 1, :, :]
+    c1 = apoly @ adb[j, :, :]
+    return (1.0 - w) * c0 + w * c1
 
 
 def _surface_coeffs(angle_deg, poly_9x6):
@@ -76,7 +84,7 @@ class SpearheadDynamics:
       [6:9]  NED position     (x, y, z)  m
       [9:13] quaternion       (q0,q1,q2,q3)
       [13:18] rotor speeds    (w1..w5)   rad/s
-      [18:21] servo angles    (dl,dr,drd) rad
+      [18:21] servo angles    (dl,dr,drd) deg  (deg cmd, unity actuator DC gain)
 
     Control vector U (8):
       [0:4] vertical motor commands  (m1..m4)  0–1000
@@ -135,6 +143,16 @@ class SpearheadDynamics:
     def get_position(self, X):
         """NED position (north, east, down) [m]."""
         return np.asarray(X[6:9], dtype=float)
+
+    def apply_constraints(self, X):
+        """Quaternion normalisation + ground clamp (z_NED >= 0 = on/below ground)."""
+        Xn = X.copy()
+        Xn[9:13] = normalize_quaternion(Xn[9:13])
+        if Xn[8] > 0.0:          # NED down-position at/below ground datum
+            Xn[8] = 0.0
+            if Xn[2] > 0.0:      # body-frame w (downward component)
+                Xn[2] = 0.0
+        return Xn
 
     def describe(self):
         p = self.params

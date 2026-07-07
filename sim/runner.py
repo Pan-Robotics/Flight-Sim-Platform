@@ -14,6 +14,11 @@ Interfaces (duck-typed):
     .get_position(X) -> np.ndarray(3)      NED (north, east, down) [m]
                                            (optional; lets the runner report
                                             position without assuming layout)
+    .apply_constraints(X) -> np.ndarray    (optional; per-step constraints such
+                                            as quaternion normalisation and
+                                            ground clamp — the runner calls it
+                                            after each integration step and
+                                            assumes no state layout of its own)
 
   Controller:
     .step(t, X) -> (U: np.ndarray, info: dict)
@@ -27,8 +32,6 @@ import datetime
 import os
 
 import numpy as np
-
-from sim.quaternion import normalize_quaternion
 
 
 class SimRunner:
@@ -81,11 +84,6 @@ class SimRunner:
         for i, t in enumerate(time_arr):
             X_hist[i, :] = X
 
-            # Generic Spearhead-style quaternion normalisation (indices 9:13).
-            # Vehicles that supply apply_constraints() handle their own normalisation there.
-            if not hasattr(dyn, 'apply_constraints') and dyn.state_dim >= 13:
-                X[9:13] = normalize_quaternion(X[9:13])
-
             # Controller step
             U, info = ctl.step(t, X)
             U_hist[i, :] = U
@@ -133,16 +131,11 @@ class SimRunner:
             k4 = dyn.derivatives(t + dt,        X + dt*k3,     U)
             X  = X + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
 
-            # Post-step: quaternion normalisation and ground clamp.
-            # Vehicle may supply apply_constraints(X) for custom logic.
+            # Post-step constraints (quaternion normalisation, ground clamp, …)
+            # are the vehicle's responsibility. The runner makes no assumptions
+            # about state layout and simply delegates when the hook is present.
             if hasattr(dyn, 'apply_constraints'):
                 X = dyn.apply_constraints(X)
-            else:
-                # Generic Spearhead-style ground clamp (z at index 8)
-                if dyn.state_dim >= 9 and X[8] > 0.0:
-                    X[8] = 0.0
-                    if X[2] > 0.0:
-                        X[2] = 0.0
 
         # ----------------------------------------------------------------
         # Flush CSV and write summary

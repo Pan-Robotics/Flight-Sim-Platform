@@ -16,28 +16,12 @@ set_waypoints(list_of_ref4) — load a list of [x,y,z_NED,psi] waypoints.
 Waypoints are tracked in sequence; each one is rate-limited with
 generate_ref_step so large position steps never cause integrator wind-up.
 """
-import os
 import numpy as np
 
-
-# ---------------------------------------------------------------------------
-# Equilibrium constants (must match quad_dynamics parameters)
-# ---------------------------------------------------------------------------
-_M        = 0.857945
-_g        = 9.81
-_Kthrust  = 1.812e-7
-_Kthrust2 = 0.0007326
-W_e = ((-4*_Kthrust2) + np.sqrt((4*_Kthrust2)**2 + 4*4*_Kthrust*_M*_g)) / (2*4*_Kthrust)
-_Mtau     = 1.0 / 44.22
-_Ku       = 515.5
-U_e_eq    = W_e / (_Ku * _Mtau)
-
-
-def _quat_to_euler(qw, qx, qy, qz):
-    phi   = np.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx**2 + qy**2))
-    theta = np.arcsin(np.clip(2*(qw*qy - qz*qx), -1.0, 1.0))
-    psi   = np.arctan2(2*(qw*qz + qx*qy), 1 - 2*(qy**2 + qz**2))
-    return phi, theta, psi
+from sim.quaternion import quat_to_euler
+# Hover-equilibrium rotor speed — imported from the vehicle so the controller's
+# equilibrium can never drift out of sync with the plant it was designed for.
+from vehicles.x4.dynamics import W_e
 
 
 def _generate_ref_step(current, target, max_rate):
@@ -116,7 +100,7 @@ class X4LQGController:
     def _to_lqg_state(self, X_full):
         """17-state quaternion plant → 16-state LQG deviation vector."""
         x, xd, y, yd, z, zd, qw, qx, qy, qz, p, q_ang, r, w1, w2, w3, w4 = X_full
-        phi, theta, psi = _quat_to_euler(qw, qx, qy, qz)
+        phi, theta, psi = quat_to_euler((qw, qx, qy, qz))
         X_lqg = np.array([x, xd, y, yd, z, zd,
                            phi, p, theta, q_ang, psi, r,
                            w1, w2, w3, w4])
@@ -128,7 +112,6 @@ class X4LQGController:
         Called every integration step (dt).  Controller recomputes only
         at integer multiples of T_ctrl; otherwise returns the held command.
         """
-        dt = self.T_ctrl   # treat as if ctrl-rate tick on every call
         # Determine if this is a controller tick
         if self._t_last is None:
             do_ctrl = True
@@ -159,11 +142,19 @@ class X4LQGController:
         self._active_ref = _generate_ref_step(
             self._active_ref, self.ref, self.max_ref_rate)
 
-        # LQR + integral control (full-state feedback, no Kalman)
-        X_dev  = self._to_lqg_state(X_full)
-        self.Xe += self._active_ref - self.Cdt @ X_dev
-        dU     = -(self.Kdt @ X_dev) - (self.Kidt @ self.Xe)
-        U_abs  = np.clip(self.U_e + dU, 0.0, 800.0)
+        # LQR + integral control (full-state feedback, no Kalman).
+        X_dev   = self._to_lqg_state(X_full)
+        Xe_next = self.Xe + (self._active_ref - self.Cdt @ X_dev)
+        dU      = -(self.Kdt @ X_dev) - (self.Kidt @ Xe_next)
+        U_raw   = self.U_e + dU
+        U_abs   = np.clip(U_raw, 0.0, 800.0)
+
+        # Anti-windup (conditional integration): commit the integral step only
+        # when the raw command is unsaturated; otherwise hold Xe so it cannot
+        # wind up against the actuator clip. In unsaturated flight this is
+        # identical to a plain accumulator.
+        if np.array_equal(U_raw, U_abs):
+            self.Xe = Xe_next
 
         self._last_U = U_abs
         phase = self._current_phase(X_full)
@@ -180,7 +171,7 @@ class X4LQGController:
         return 'hover'
 
     def _make_info(self, X_full, phase):
-        phi, theta, psi = _quat_to_euler(*X_full[6:10])
+        phi, theta, psi = quat_to_euler(X_full[6:10])
         return {
             'phase':     phase,
             'alt_m':     -X_full[4],
