@@ -2,8 +2,11 @@
 Candidate: Spearhead VTOL with nested-PID controller.
 
 Provides:
-  build()  -> (dynamics, controller, config)
-  plot(X_hist, U_hist, config, log_path)  -> shows figures
+  build(overrides=None) -> (dynamics, controller, config)
+  plot(X_hist, U_hist, config, show=True) -> list[Figure]
+  trim_specs(dynamics)  -> trim conditions for analyze_candidate.py
+                           (incl. the infeasible pure-wing 'cruise' — see
+                            README "Known issue")
 """
 import os
 import numpy as np

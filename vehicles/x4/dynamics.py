@@ -7,8 +7,14 @@ Implements the VehicleDynamics interface:
   .get_position(X) -> np.ndarray (3,)   NED position (north, east, down)
   .apply_constraints(X) -> np.ndarray   (normalises quat at X[6:10] + ground clamp)
   .terminal_condition(t, X) -> str|None ('crash' / 'departure')
+  .set_wind_ned(w)                      (drag acts on air-relative velocity)
   .derivatives(t, X, U) -> np.ndarray
   .describe() -> dict
+
+Construct with X4Dynamics(params={...}) to override NOMINAL_PARAMS entries
+(Monte Carlo dispersion); the instance computes its own hover equilibrium
+self.W_e while the module-level W_e / U_e stay at the design point for the
+controller.
 
 State vector (17):
   [0]  x      NED North [m]

@@ -1,29 +1,36 @@
 # UAV Simulation Platform
 
-A modular, candidate-based simulation framework for testing arbitrary vehicle dynamics and control systems together. Each *candidate* pairs a vehicle dynamics model with a controller and a set of simulation parameters. The infrastructure (integrator, logger, runner) is shared and vehicle-agnostic.
+A modular, candidate-based simulation framework for validating vehicle dynamics and control systems together, before hardware. Each *candidate* pairs a vehicle dynamics model with a controller and a set of simulation parameters. The infrastructure — integrator, logger, verdict system, disturbances, sweep/Monte-Carlo runner, trim/linearization tools — is shared and vehicle-agnostic.
 
-Two candidates are included: the Spearhead VTOL with a nested-PID controller, and the X4 quadcopter with an LQG (LQR+I) controller.
+Every run is judged (PASS/FAIL/CRASHED/DEPARTED/DIVERGED), envelope-checked, reproducible (git commit + full config + seeds recorded), and machine-readable (JSON summary + exit codes). A golden-run regression suite pins simulation behavior; disturbances and parameter dispersion are strictly opt-in.
+
+Two candidates are included: the Spearhead VTOL with a nested-PID controller, and the X4 quadcopter with an LQR+I full-state controller.
 
 ---
 
 ## Directory Structure
 
 ```
-sim_platform/
-├── run_candidate.py              Entry point — run any candidate from the command line
+.
+├── run_candidate.py              Run one candidate (headless by default, --show, --set overrides)
+├── run_sweep.py                  Batch runner: parameter grid x Monte Carlo -> summary.csv
+├── analyze_candidate.py          Trim + linearization + eigenvalue report per flight condition
 │
 ├── sim/                          Simulation infrastructure (vehicle-agnostic)
-│   ├── config.py                 SimConfig dataclass
-│   ├── pid.py                    Generic PID with anti-windup (utility, optional)
-│   ├── quaternion.py             Quaternion utilities (normalise, Euler, rotate, kinematics)
-│   └── runner.py                 SimRunner: RK4 loop + phase tracker + CSV/log writer
+│   ├── config.py                 SimConfig dataclass (incl. terminate_on, pass_criteria, wind)
+│   ├── runner.py                 SimRunner: RK4 loop, envelope/termination, verdicts, logging
+│   ├── wind.py                   Toggle-able disturbances: constant wind + seeded Dryden gusts
+│   ├── analysis.py               trim(), linearize(), eig_report()
+│   ├── pid.py                    Generic PID with integral anti-windup
+│   └── quaternion.py             Quaternion utilities (body->NED convention; see header)
 │
 ├── vehicles/                     One sub-package per vehicle
 │   ├── spearhead/
 │   │   ├── dynamics.py           SpearheadDynamics — 21-state quaternion 6-DOF VTOL
 │   │   └── *.txt                 Aerodynamic database tables
 │   └── x4/
-│       └── dynamics.py           X4Dynamics — 17-state quaternion quadcopter
+│       ├── dynamics.py           X4Dynamics — 17-state quaternion quadcopter
+│       └── data/                 X4 plant matrices + tuned LQR/LQG gains (*.txt)
 │
 ├── controllers/                  One sub-package per controller type
 │   ├── spearhead_vtol/
@@ -31,24 +38,31 @@ sim_platform/
 │   └── x4_lqg/
 │       └── controller.py         X4LQGController — discrete-time LQR+I (full-state)
 │
-└── candidates/                   Wiring: vehicle + controller + SimConfig
-    ├── spearhead_vtol.py          build() + plot() for Spearhead VTOL
-    └── x4_lqg.py                 build() + plot() for X4 quadcopter
+├── candidates/                   Wiring: vehicle + controller + SimConfig
+│   ├── spearhead_vtol.py         build() + plot() + trim_specs() for Spearhead VTOL
+│   └── x4_lqg.py                 build() + plot() + trim_specs() for X4 quadcopter
+│
+├── sweeps/                       Example sweep/Monte-Carlo specs (YAML)
+└── tests/                        Unit + machinery + golden-run regression tests
 ```
 
-Logs are written to `sim_platform/logs/` (created automatically on first run).
+Logs are written to `logs/` at the repo root (created automatically, gitignored).
 
 ---
 
 ## Quick Start
 
-Run from inside `sim_platform/`:
+Run from the repo root:
 
 ```bash
 python run_candidate.py                           # default (Spearhead VTOL), headless
 python run_candidate.py candidates.spearhead_vtol
 python run_candidate.py candidates.x4_lqg
 python run_candidate.py candidates.x4_lqg --show  # interactive plot windows
+python run_candidate.py candidates.x4_lqg --set vehicle.M=0.9 --set config.tf=20
+
+python run_sweep.py sweeps/example_x4_dispersion.yaml -j 3   # batch / Monte Carlo
+python analyze_candidate.py candidates.x4_lqg                # trim + eigenvalues
 ```
 
 Runs are **headless by default**: figures are saved as PNGs next to the log
@@ -205,6 +219,12 @@ class MyDynamics:
         """Return 'crash' or 'departure' to end the run early (gated by
         config.terminate_on). Divergence (non-finite state) always
         terminates regardless."""
+
+    def set_wind_ned(self, w: np.ndarray):
+        """Accept the current wind vector (NED, m/s), called once per
+        integration step when config.wind is enabled. Apply it to your
+        aero/drag terms as air-relative flow. Vehicles without this hook
+        are simply not disturbed (the runner warns)."""
 ```
 
 ### Controller
@@ -252,7 +272,7 @@ config = SimConfig(
     },
     vehicle_name    = 'my_craft',
     controller_name = 'my_ctrl',
-    log_dir         = 'logs',   # relative to sim_platform/sim/
+    log_dir         = 'logs',   # relative to the repo root (or absolute)
     log_hz          = 50.0,     # CSV decimation rate [Hz]
     terminate_on    = {         # which detected events end the run early
         'crash':         True,
@@ -263,6 +283,8 @@ config = SimConfig(
         'alt_m': (9.0, 11.0),   # metric -> (lo, hi); metrics come from the
         'vx_ms': (49.0, 59.0),  # final controller info dict + position keys
     },
+    wind            = None,     # None = disturbances OFF (default);
+                                # see "Disturbances" above for the schema
 )
 ```
 
@@ -307,6 +329,10 @@ class MyDynamics:
         ...
         return dX
 
+    def get_position(self, X):
+        # NED (north, east, down) — enables [END STATE], alt/pos pass criteria
+        return np.array([X[0], X[2], X[4]])
+
     def apply_constraints(self, X):
         # called after every RK4 step — normalise quaternion, clamp to ground, etc.
         return X
@@ -314,6 +340,10 @@ class MyDynamics:
     def describe(self):
         return {'mass_kg': 1.0, 'model': 'point mass'}
 ```
+
+Optional extras when you need them: `envelope_violations(X)`,
+`terminal_condition(t, X)`, `set_wind_ned(w)` — see the interface reference
+above.
 
 ### 2. Create the controller package
 
@@ -365,20 +395,40 @@ from sim.config import SimConfig
 from vehicles.my_vehicle.dynamics import MyDynamics
 from controllers.my_ctrl.controller import MyController
 
-def build():
-    config     = SimConfig(dt=0.001, tf=60.0,
-                           vehicle_name='my_vehicle',
-                           controller_name='my_ctrl')
-    dynamics   = MyDynamics()
+def build(overrides=None):
+    """overrides: optional {'vehicle': {...}, 'config': {...}} from
+    sweeps / --set. Apply what your candidate supports; ignore the rest."""
+    ov = overrides or {}
+    config = SimConfig(dt=0.001, tf=60.0,
+                       vehicle_name='my_vehicle',
+                       controller_name='my_ctrl',
+                       pass_criteria={'alt_m': (9.0, 11.0)})
+    for k, v in ov.get('config', {}).items():
+        setattr(config, k, v)
+    dynamics   = MyDynamics()          # pass ov.get('vehicle') if it takes params
     controller = MyController(gain=5.0)
     return dynamics, controller, config
 
-def plot(X_hist, U_hist, config):
+def plot(X_hist, U_hist, config, show=True):
+    """Build figures and return them; show=False for headless (default CLI)."""
     t = np.arange(X_hist.shape[0]) * config.dt
-    plt.figure()
+    fig = plt.figure()
     plt.plot(t, X_hist[:, 4], label='z NED [m]')
     plt.grid(True)
-    plt.show()
+    if show:
+        plt.show()
+    return [fig]
+```
+
+Optionally declare trim conditions for `analyze_candidate.py`:
+
+```python
+def trim_specs(dynamics):
+    return {'hover': {
+        'X0': dynamics.initial_state(), 'U0': np.zeros(2),
+        'free_states': ['zdot'], 'free_controls': ['thrust'],
+        'residual_states': ['zdot'],
+    }}
 ```
 
 ### 4. Run it
@@ -392,34 +442,58 @@ python run_candidate.py candidates.my_candidate
 
 ## Shared Utilities
 
-### `sim/pid.py` — PID with anti-windup
+### `sim/pid.py` — PID with integral anti-windup
 
 ```python
 from sim.pid import PID
 
-pid = PID(kp=1.0, ki=0.05, kd=0.1, lim=25.0)
-output = pid.update(error, dt)
+pid = PID(Kp=1.0, Ki=0.05, Kd=0.1, dt=0.001, integral_limit=25.0)
+output = pid.update(error)      # dt is fixed at construction
 pid.reset()
 ```
 
 | Parameter | Description |
 |---|---|
-| `kp, ki, kd` | Proportional, integral, derivative gains |
-| `lim` | Symmetric saturation on integral and output `[-lim, +lim]` |
+| `Kp, Ki, Kd` | Proportional, integral, derivative gains |
+| `dt` | Controller timestep [s] (used by the I and D terms) |
+| `integral_limit` | Clamps the raw accumulator to `±integral_limit`, bounding the Ki contribution to `±Ki·integral_limit` (None = no clamp) |
 
 ### `sim/quaternion.py` — Quaternion tools
 
-All functions use scalar-first ordering `[qw, qx, qy, qz]`.
+All functions use scalar-first ordering `[qw, qx, qy, qz]`, and `q` is the
+**body→NED attitude quaternion** (`v_NED = q ⊗ v_body ⊗ q*`) — consistent
+across `quat_kinematics`, `quat_to_euler`, and both rotate helpers. This
+invariant is guarded by tests (`tests/test_quaternion.py`); see the module
+header for the history of the pre-2026-07 crossed-convention bug.
 
 ```python
 from sim.quaternion import (
     normalize_quaternion,    # q / |q|
     quat_to_euler,           # [q0..q3] -> (phi, theta, psi) in radians
-    quat_kinematics,         # q_dot from q and body rates (p, q_omega, r)
+    quat_kinematics,         # q_dot = 0.5 q (x) [0, omega_body]
     quat_multiply,           # Hamilton product
-    rotate_body_to_inertial, # rotate 3-vector using quaternion
-    rotate_inertial_to_body,
+    rotate_body_to_inertial, # v_NED  = q (x) v_body (x) q*
+    rotate_inertial_to_body, # v_body = q* (x) v_NED (x) q
 )
+```
+
+### `sim/wind.py` — WindModel
+
+Constructed by the runner from `SimConfig.wind`; you normally don't
+instantiate it yourself. `WindModel(spec, dt).step()` returns the current
+NED wind vector: constant part + first-order Gauss–Markov Dryden surrogate
+(exact discretisation, seeded RNG — same seed, same gust history).
+
+### `sim/analysis.py` — trim / linearize / eigenvalues
+
+```python
+from sim.analysis import trim, linearize, eig_report, format_mode
+
+res     = trim(dyn, X0, U0, free_states, free_controls, residual_states,
+               quat_states=None, bounds=None)   # bounded least-squares
+A, B, f0 = linearize(dyn, res.X, res.U)         # central differences
+for m in eig_report(A):                          # most unstable first
+    print(format_mode(m))
 ```
 
 ---
@@ -428,7 +502,7 @@ from sim.quaternion import (
 
 ### Quaternion normalisation drift
 
-RK4 does not conserve the unit norm constraint on quaternions. After ~1000 steps the quaternion will drift. Provide `apply_constraints()` and call `normalize_quaternion()` there. If you omit `apply_constraints`, the runner applies its own normalisation at indices `[9:13]` — wrong if your quaternion lives elsewhere.
+RK4 does not conserve the unit norm constraint on quaternions. After ~1000 steps the quaternion will drift. Provide `apply_constraints()` and call `normalize_quaternion()` there. The runner never touches your state itself — if you omit the hook, nothing normalises your quaternion and it *will* drift.
 
 ### Waypoint sequencing with a rate-limited reference
 
@@ -503,9 +577,13 @@ A quadrotor-wing VTOL: four vertical lift rotors (m1–m4), one pusher motor (m5
 
 **Controller:** 4-loop nested PID. Altitude → vertical velocity → rotor thrust. Angle → angular rate → motor differential (hover) or surface deflection (forward flight). Wing-lift handoff blends rotor authority to zero at 54 m/s.
 
-**Flight phases:** spinup (0–5 s) → hover (5–30 s) → transition (30–90 s) → fwd_flight (90–180 s)
+**Flight phases:** spinup (0–5 s) → hover (5–30 s) → transition (30–90 s) → fwd_flight (90 s →)
 
-**Performance note:** 180 s of simulation at dt = 1 ms takes approximately 10 minutes wall time on a modern laptop. Use `tf = 35` to quickly verify phase transitions without waiting for the full run.
+**Trim conditions** (`analyze_candidate.py candidates.spearhead_vtol`): `hover` (converges to the coded `W_HOVER = 808`), `cruise` (pure wing-borne at 54 m/s — **infeasible**: wing lift equals weight with zero margin, the solver pins the ±30° α clip), `cruise_assisted` (converges: rear-heavy rotor lift m3/m4 ≈ 410/425 vs m1/m2 ≈ 119/154, pusher ≈ 529, rudder countering pusher torque — but open-loop unstable, ωn ≈ 1.3 and 1.9 rad/s).
+
+**Known issue — mission verdict is `CRASHED` (~t = 99 s).** The wing-lift handoff blends out rotor lift exactly where the `cruise` trim shows the wing alone cannot carry the weight, so the aircraft sinks into the ground during cruise. Root-caused via the trim tools above; fixing it means keeping partial rotor assist in cruise, raising cruise speed, or retuning the blend schedule.
+
+**Performance note:** the full mission at dt = 1 ms takes roughly 2–4 minutes wall time (it terminates at the ~99 s crash). Use `--set config.tf=35` to quickly verify phase transitions.
 
 ---
 
@@ -519,23 +597,26 @@ All in NED (z positive down). Motor speeds `w1..w4` in rad/s.
 
 **Control (4):** motor PWM commands 0–800 per motor. Equilibrium ≈ 166.5.
 
-**Controller:** Discrete-time LQG gains (Kdt, Kidt, Ldt) loaded from `x4_quadcopter/data/`. Runs at 100 Hz with 1 kHz RK4 integration. Reference format: `[x_N, y_E, z_NED, psi]`.
+**Controller:** Discrete-time LQR+I gains (Kdt, Kidt, Ldt) loaded from `vehicles/x4/data/` — the plant model and its tuned gains are vendored with the vehicle they describe. Runs at 100 Hz with 1 kHz RK4 integration, conditional-integration anti-windup against the 0–800 command clip. Reference format: `[x_N, y_E, z_NED, psi]`. The controller always uses the *nominal* plant (design point), even when the dynamics are perturbed by a sweep.
 
-**LQG data files** (in `x4_quadcopter/data/`):
+**Plant/gain data files** (in `vehicles/x4/data/`):
 
 | File | Shape | Description |
 |---|---|---|
 | `Adt.txt` | 16×16 | Discrete state matrix |
 | `Bdt.txt` | 16×4 | Discrete input matrix |
 | `Cdt.txt` | 4×16 | Output matrix (x, y, z, psi) |
+| `Ddt.txt` | 4×4 | Feedthrough (zero) |
 | `Kdt.txt` | 4×16 | LQR state-feedback gain |
 | `Kidt.txt` | 4×4 | Integral gain |
-| `Ldt.txt` | 16×4 | Kalman filter gain |
+| `Ldt.txt` | 16×4 | Kalman filter gain (unused in full-state mode) |
 | `U_e.txt` | 4 | Equilibrium motor command |
 
 **Flight phases:** ground → climbing → hover → transit (waypoint sequencing)
 
-**Mission:** hover at 1.5 m AGL → transit NE to (5 m, 3 m) → descend to 3 m AGL → return to origin.
+**Mission:** hover at 1.5 m AGL → transit NE to (5 m, 3 m) → climb to 3 m AGL → return to origin. Full mission (120 s, ~30 s wall time) ends **PASS**; robustness demo: 8/8 PASS across ±5 % mass, ±8 % thrust and 3 m/s gusty wind (`sweeps/example_x4_dispersion.yaml`).
+
+**Trim condition** (`analyze_candidate.py candidates.x4_lqg`): `hover` converges exactly to the analytic `W_e`/`U_e`; open-loop modes are the drag poles (−Dxx/M, −Dzz/M), motor poles (−1/Mtau) and neutral kinematic integrators.
 
 ---
 
@@ -544,20 +625,38 @@ All in NED (z positive down). Motor speeds `w1..w4` in rad/s.
 ### Log file (`.log`)
 
 ```
-[SIMULATION PARAMETERS]   dt, tf, phases, references, log_hz
-[VEHICLE]                  describe() key-value pairs
-[CONTROLLER]               describe() key-value pairs
-[PHASE EVENTS]             t=..s  ENTER <PHASE>  alt_m=...  roll_deg=...
+[REPRODUCIBILITY]           git commit (+dirty flag), python, numpy versions
+[SIMULATION PARAMETERS]     full SimConfig dump (incl. terminate_on,
+                            pass_criteria, wind)
+[VEHICLE]                   describe() key-value pairs
+[CONTROLLER]                describe() key-value pairs
+[PHASE EVENTS]              t=..s  ENTER <PHASE>  alt_m=...  roll_deg=...
+                            t=..s  ENVELOPE EXIT — data invalid from here on
 [PHASE PERFORMANCE SUMMARY] mean / min / max of every numeric info field per phase
-[END STATE]                final position and altitude
+[END STATE]                 final time, position (via get_position), altitude
+[ENVELOPE]                  first exit time + valid fraction (if vehicle
+                            declares an envelope)
+[VERDICT]                   PASS / FAIL / COMPLETE / CRASHED / DEPARTED /
+                            DIVERGED, with per-criterion results
 ```
 
 ### CSV file (`.csv`)
 
-Columns: `time_s`, `phase`, all `state_names`, all `control_names`, all numeric `info` keys (in the order first seen on step 0). Row rate = `log_hz`.
+Columns: `time_s`, `phase`, all `state_names`, all `control_names`, all numeric
+`info` keys (in the order first seen on step 0), then `wind_n / wind_e / wind_d`
+(only when wind is enabled) and `data_valid` (0 after any envelope exit).
+Row rate = `log_hz`. Histories are truncated at early termination.
 
 Load with:
 ```python
 import pandas as pd
 df = pd.read_csv('logs/flight_20260315_205137.csv')
 ```
+
+### JSON summary (`.json`)
+
+One machine-readable document per run: schema id, timestamp, vehicle /
+controller names, git metadata, python/numpy versions, the full config,
+verdict + reason + per-criterion results, envelope stats, end-state metrics,
+and paths to the log/CSV. This is the artifact `run_sweep.py` aggregates
+into `summary.csv`.

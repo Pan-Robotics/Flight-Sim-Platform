@@ -28,6 +28,10 @@ Interfaces (duck-typed):
     .terminal_condition(t, X) -> str|None  (optional; return 'crash' or
                                             'departure' to end the run early —
                                             gated by config.terminate_on)
+    .set_wind_ned(w)                       (optional; receives the current
+                                            NED wind vector once per step when
+                                            config.wind is enabled — vehicles
+                                            without it are not disturbed)
 
   Controller:
     .step(t, X) -> (U: np.ndarray, info: dict)

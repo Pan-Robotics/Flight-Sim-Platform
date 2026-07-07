@@ -6,10 +6,16 @@ Implements the VehicleDynamics interface expected by sim.runner.SimRunner:
   .initial_state() -> np.ndarray
   .get_position(X) -> np.ndarray(3)   NED position (north, east, down)
   .apply_constraints(X) -> np.ndarray (quat normalise at X[9:13] + ground clamp)
-  .envelope_violations(X) -> list[str] (aero DB validity: |alpha|,|beta| <= 30 deg)
+  .envelope_violations(X) -> list[str] (aero DB validity: |alpha|,|beta| <= 30 deg,
+                                        computed on air-relative flow)
   .terminal_condition(t, X) -> str|None ('crash' / 'departure')
+  .set_wind_ned(w)                      (all aero terms use air-relative flow)
   .derivatives(t, X, U) -> np.ndarray
   .describe() -> dict
+
+Construct with SpearheadDynamics(params={...}) to override entries of the
+nominal class-level params dict (Monte Carlo dispersion); controllers should
+be built from the class-level nominals (design point).
 """
 import os
 import numpy as np

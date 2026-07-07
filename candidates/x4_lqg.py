@@ -8,8 +8,9 @@ Mission: take off to 1.5 m AGL, hold, then fly a 3-waypoint path:
   wp3: [0, 0, -3.0, 0]   return (higher altitude)
 
 Provides:
-  build()  -> (dynamics, controller, config)
-  plot(X_hist, U_hist, config)
+  build(overrides=None) -> (dynamics, controller, config)
+  plot(X_hist, U_hist, config, show=True) -> list[Figure]
+  trim_specs(dynamics)  -> trim conditions for analyze_candidate.py
 """
 import os
 import numpy as np
