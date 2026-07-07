@@ -34,23 +34,35 @@ Control (4):  motor PWM commands 0–800 per motor
 import numpy as np
 
 
-# --- Vehicle parameters (from CAD / MATLAB control design) ---
-_M       = 0.857945
-_g       = 9.81
-_L       = 0.16319
-_Ixx     = 1.061e5 / (1000 * 10000)
-_Iyy     = 1.061e5 / (1000 * 10000)
-_Izz     = 2.011e5 / (1000 * 10000)
-_Ktau    = 7.708e-10 * 2
-_Kthrust  = 1.812e-7
-_Kthrust2 = 0.0007326
-_Mtau    = 1.0 / 44.22
-_Ku      = 515.5
-_Dxx     = 0.01212
-_Dyy     = 0.01212
-_Dzz     = 0.0648
+# --- Nominal vehicle parameters (from CAD / MATLAB control design) ---
+# Per-instance values may be overridden via X4Dynamics(params={...}) for
+# Monte Carlo dispersion; these module-level nominals feed the controller's
+# equilibrium so the *controller* always uses the design-point plant.
+NOMINAL_PARAMS = {
+    'M':        0.857945,
+    'g':        9.81,
+    'L':        0.16319,
+    'Ixx':      1.061e5 / (1000 * 10000),
+    'Iyy':      1.061e5 / (1000 * 10000),
+    'Izz':      2.011e5 / (1000 * 10000),
+    'Ktau':     7.708e-10 * 2,
+    'Kthrust':  1.812e-7,
+    'Kthrust2': 0.0007326,
+    'Mtau':     1.0 / 44.22,
+    'Ku':       515.5,
+    'Dxx':      0.01212,
+    'Dyy':      0.01212,
+    'Dzz':      0.0648,
+}
 
-# Hover equilibrium motor speed and command
+_M        = NOMINAL_PARAMS['M']
+_g        = NOMINAL_PARAMS['g']
+_Kthrust  = NOMINAL_PARAMS['Kthrust']
+_Kthrust2 = NOMINAL_PARAMS['Kthrust2']
+_Mtau     = NOMINAL_PARAMS['Mtau']
+_Ku       = NOMINAL_PARAMS['Ku']
+
+# Nominal hover equilibrium motor speed and command (design point)
 W_e   = ((-4*_Kthrust2) + np.sqrt((4*_Kthrust2)**2 + 4*4*_Kthrust*_M*_g)) / (2*4*_Kthrust)
 U_e   = W_e / (_Ku * _Mtau)
 U_e_eq = U_e   # alias used by candidates/x4_lqg.py
@@ -76,11 +88,28 @@ class X4Dynamics:
     ]
     control_names = ['m1', 'm2', 'm3', 'm4']
 
+    def __init__(self, params=None):
+        """params: optional dict overriding NOMINAL_PARAMS entries
+        (e.g. {'M': 0.94} for Monte Carlo dispersion)."""
+        self.params = {**NOMINAL_PARAMS, **(params or {})}
+        p = self.params
+        # This instance's true hover equilibrium (differs from the nominal
+        # W_e when the plant is perturbed — the controller keeps nominal)
+        self.W_e = ((-4*p['Kthrust2'])
+                    + np.sqrt((4*p['Kthrust2'])**2
+                              + 4*4*p['Kthrust']*p['M']*p['g'])) \
+                   / (2*4*p['Kthrust'])
+        self._wind_ned = np.zeros(3)
+
+    def set_wind_ned(self, w):
+        """Steady/gust wind, NED [m/s]. Drag acts on air-relative velocity."""
+        self._wind_ned = np.asarray(w, dtype=float)
+
     def initial_state(self, x0=0.0, y0=0.0, z0=0.0):
         X = np.zeros(17)
         X[0], X[2], X[4] = x0, y0, z0
-        X[6]    = 1.0     # identity quaternion (level, north-heading)
-        X[13:17] = W_e    # motors at hover equilibrium
+        X[6]    = 1.0        # identity quaternion (level, north-heading)
+        X[13:17] = self.W_e  # motors at this plant's hover equilibrium
         return X
 
     def get_position(self, X):
@@ -115,12 +144,27 @@ class X4Dynamics:
         return Xn
 
     def derivatives(self, t, X, U):
+        pr = self.params
+        M, g, L          = pr['M'], pr['g'], pr['L']
+        Ixx, Iyy, Izz    = pr['Ixx'], pr['Iyy'], pr['Izz']
+        Ktau, Kth, Kth2  = pr['Ktau'], pr['Kthrust'], pr['Kthrust2']
+        Mtau, Ku         = pr['Mtau'], pr['Ku']
+        Dxx, Dyy, Dzz    = pr['Dxx'], pr['Dyy'], pr['Dzz']
+
         x, xd, y, yd, z, zd, qw, qx, qy, qz, p, q_ang, r, w1, w2, w3, w4 = X
         U = np.asarray(U).flatten()
         w = np.array([w1, w2, w3, w4])
-        F  = _Kthrust * w**2 + _Kthrust2 * w
+        F  = Kth * w**2 + Kth2 * w
         Fn = F.sum()
-        Tn = _Ktau * (w1**2 - w2**2 - w3**2 + w4**2)
+        Tn = Ktau * (w1**2 - w2**2 - w3**2 + w4**2)
+
+        # Drag acts on air-relative velocity (wind toggle-able; zero when off)
+        if self._wind_ned.any():
+            wxa = xd - self._wind_ned[0]
+            wya = yd - self._wind_ned[1]
+            wza = zd - self._wind_ned[2]
+        else:
+            wxa, wya, wza = xd, yd, zd
 
         dX = np.zeros(17)
         dX[0] = xd
@@ -128,24 +172,25 @@ class X4Dynamics:
         dX[4] = zd
         dX[6:10] = _quat_deriv(qw, qx, qy, qz, p, q_ang, r)
 
-        dX[1] = -(Fn/_M) * 2*(qx*qz + qw*qy) - _Dxx/_M * xd
-        dX[3] = -(Fn/_M) * 2*(qy*qz - qw*qx)          - _Dyy/_M * yd
-        dX[5] = _g - (Fn/_M) * (1 - 2*(qx**2 + qy**2)) - _Dzz/_M * zd
+        dX[1] = -(Fn/M) * 2*(qx*qz + qw*qy) - Dxx/M * wxa
+        dX[3] = -(Fn/M) * 2*(qy*qz - qw*qx)          - Dyy/M * wya
+        dX[5] = g - (Fn/M) * (1 - 2*(qx**2 + qy**2)) - Dzz/M * wza
 
-        dX[10] = (_L/_Ixx) * (F[0]+F[1]-F[2]-F[3]) - (_Izz-_Iyy)/_Ixx * r * q_ang
-        dX[11] = (_L/_Iyy) * (F[0]-F[1]+F[2]-F[3]) - (_Izz-_Ixx)/_Iyy * p * r
-        dX[12] = Tn/_Izz                             - (_Iyy-_Ixx)/_Izz * p * q_ang
+        dX[10] = (L/Ixx) * (F[0]+F[1]-F[2]-F[3]) - (Izz-Iyy)/Ixx * r * q_ang
+        dX[11] = (L/Iyy) * (F[0]-F[1]+F[2]-F[3]) - (Izz-Ixx)/Iyy * p * r
+        dX[12] = Tn/Izz                            - (Iyy-Ixx)/Izz * p * q_ang
 
-        dX[13:17] = -(1.0/_Mtau) * w + _Ku * U
+        dX[13:17] = -(1.0/Mtau) * w + Ku * U
         return dX
 
     def describe(self):
+        pr = self.params
         return {
             'model':      'X4 quadcopter (quaternion, NED z-down)',
-            'mass_kg':    _M,
-            'arm_m':      _L,
-            'Ixx_kgm2':  _Ixx,
-            'Izz_kgm2':  _Izz,
-            'W_e_rad_s':  W_e,
+            'mass_kg':    pr['M'],
+            'arm_m':      pr['L'],
+            'Ixx_kgm2':  pr['Ixx'],
+            'Izz_kgm2':  pr['Izz'],
+            'W_e_rad_s':  self.W_e,
             'U_e_cmd':    U_e,
         }

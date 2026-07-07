@@ -1,0 +1,24 @@
+# Example: X4 robustness sweep — wind grid x Monte Carlo mass/thrust dispersion.
+#   python run_sweep.py sweeps/example_x4_dispersion.yaml -j 3
+candidate: candidates.x4_lqg
+name: x4_dispersion_demo
+
+base:
+  config:
+    tf: 20.0                      # climb + start of NE transit
+    pass_criteria:
+      alt_m: [1.0, 3.5]           # airborne and near mission altitudes
+
+grid:
+  config.wind:
+    - null                        # calm
+    - constant_ned: [3.0, 0.0, 0.0]   # steady 3 m/s northerly
+      dryden: {V: 5.0, sigma: [0.8, 0.8, 0.4], L: [50.0, 50.0, 20.0]}
+      seed: 42
+
+monte_carlo:
+  n: 4                            # draws per grid point -> 8 runs total
+  seed: 2026
+  dispersions:
+    vehicle.M:        {type: normal_pct,  sigma_pct: 5}
+    vehicle.Kthrust:  {type: uniform_pct, pct: 8}

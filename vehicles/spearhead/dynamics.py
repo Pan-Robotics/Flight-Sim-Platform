@@ -106,7 +106,9 @@ class SpearheadDynamics:
     ]
     control_names = ['m1', 'm2', 'm3', 'm4', 'm5', 'servo_le', 'servo_re', 'servo_rud']
 
-    # Vehicle constants (used by both dynamics and controller)
+    # NOMINAL vehicle constants. The controller should be built from this
+    # class-level dict (design point); each instance carries its own copy in
+    # self.params, optionally perturbed for Monte Carlo dispersion.
     params = {
         'M':    20.0,
         'g':    9.81,
@@ -127,7 +129,9 @@ class SpearheadDynamics:
         'CMY0': 0.03716,    # pitching moment coeff at alpha=beta=0
     }
 
-    def __init__(self, data_dir=None):
+    def __init__(self, data_dir=None, params=None):
+        """params: optional dict overriding entries of the nominal class-level
+        params (e.g. {'M': 22.0} for Monte Carlo dispersion)."""
         if data_dir is None:
             # Default: ADB files live alongside this file in vehicles/spearhead/
             data_dir = os.path.dirname(os.path.abspath(__file__))
@@ -136,6 +140,12 @@ class SpearheadDynamics:
         self._le     = _load_poly(os.path.join(data_dir, 'le_w_hat.txt'))
         self._re     = _load_poly(os.path.join(data_dir, 're_w_hat.txt'))
         self._rudder = _load_poly(os.path.join(data_dir, 'rudder_w_hat.txt'))
+        self.params  = {**SpearheadDynamics.params, **(params or {})}
+        self._wind_ned = np.zeros(3)
+
+    def set_wind_ned(self, w):
+        """Steady/gust wind, NED [m/s]. All aero terms use air-relative flow."""
+        self._wind_ned = np.asarray(w, dtype=float)
 
     def initial_state(self):
         X = np.zeros(self.state_dim)
@@ -164,8 +174,14 @@ class SpearheadDynamics:
                                # and alpha/beta are numerically meaningless
 
     def envelope_violations(self, X):
-        """Non-empty list of reasons when outside the validated aero envelope."""
+        """Non-empty list of reasons when outside the validated aero envelope.
+        Uses air-relative flow when wind is active — envelope validity is a
+        property of the airflow the aero DB sees, not of ground velocity."""
         u, v, w = X[0:3]
+        if self._wind_ned.any():
+            w_b = rotate_inertial_to_body(self._wind_ned,
+                                          normalize_quaternion(X[9:13]))
+            u, v, w = u - w_b[0], v - w_b[1], w - w_b[2]
         V = np.sqrt(u*u + v*v + w*w)
         if V < self.ENV_MIN_SPEED:
             return []
@@ -235,10 +251,15 @@ class SpearheadDynamics:
         Fn   = F1 + F2 + F3 + F4
         Taun = Tau1 + Tau2 + Tau3 + Tau4
 
-        # Aerodynamics
-        V = np.sqrt(u*u + v*v + w*w)
-        alpha_deg = np.degrees(np.arctan2(w, u)) if V > 1e-6 else 0.0
-        beta_deg  = np.degrees(np.arcsin(v / V)) if V > 1e-6 else 0.0
+        # Aerodynamics — air-relative flow (wind toggle-able; zero when off)
+        if self._wind_ned.any():
+            w_b = rotate_inertial_to_body(self._wind_ned, quat)
+            ua, va, wa = u - w_b[0], v - w_b[1], w - w_b[2]
+        else:
+            ua, va, wa = u, v, w
+        V = np.sqrt(ua*ua + va*va + wa*wa)
+        alpha_deg = np.degrees(np.arctan2(wa, ua)) if V > 1e-6 else 0.0
+        beta_deg  = np.degrees(np.arcsin(va / V)) if V > 1e-6 else 0.0
 
         adb_C = _aero_coeffs(alpha_deg, beta_deg, self._adb, self._beta_breaks)
         le_C  = _surface_coeffs(dl,  self._le)

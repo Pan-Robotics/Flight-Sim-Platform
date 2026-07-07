@@ -24,6 +24,11 @@ class SimConfig:
       'east_m', 'down_m' (from dynamics.get_position).  Maps metric -> (lo, hi).
       Empty dict -> verdict is COMPLETE/CRASHED/... with no PASS/FAIL judgement.
       e.g. {'alt_m': (9.0, 11.0), 'vx_ms': (49.0, 59.0)}
+
+    wind: None (default — disturbances OFF, bit-identical to a windless build)
+      or a dict enabling constant wind and/or seeded Dryden gusts; see
+      sim/wind.py for the schema.  Requires the vehicle to expose
+      set_wind_ned(w); the runner warns and ignores wind otherwise.
     """
     dt:               float = 0.001
     tf:               float = 180.0
@@ -40,3 +45,4 @@ class SimConfig:
                                 'crash': True, 'departure': True,
                                 'envelope_exit': False})
     pass_criteria:    dict  = field(default_factory=dict)
+    wind:             dict | None = None

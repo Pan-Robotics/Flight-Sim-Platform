@@ -17,8 +17,13 @@ from vehicles.spearhead.dynamics import SpearheadDynamics
 from controllers.spearhead_vtol.controller import SpearheadVTOLController
 
 
-def build():
-    """Create and return (dynamics, controller, config) for this candidate."""
+def build(overrides=None):
+    """Create and return (dynamics, controller, config) for this candidate.
+
+    overrides (optional): {'vehicle': {param: val}, 'config': {field: val}}
+    — used by sweeps / Monte Carlo.
+    """
+    ov = overrides or {}
     config = SimConfig(
         dt             = 0.001,
         tf             = 180.0,
@@ -33,9 +38,92 @@ def build():
                           'vx_ms': (49.0, 59.0)},
     )
 
-    dynamics   = SpearheadDynamics()  # ADB data in vehicles/spearhead/ by default
-    controller = SpearheadVTOLController(dynamics.params, config)
+    for k, v in ov.get('config', {}).items():
+        setattr(config, k, v)
+
+    # Plant may be perturbed (Monte Carlo); the controller is built from the
+    # NOMINAL class-level params (design point) so plant/controller mismatch
+    # is what a dispersion sweep actually measures.
+    dynamics   = SpearheadDynamics(params=ov.get('vehicle'))
+    controller = SpearheadVTOLController(SpearheadDynamics.params, config)
     return dynamics, controller, config
+
+
+# ---------------------------------------------------------------------------
+# Trim conditions (consumed by analyze_candidate.py)
+# ---------------------------------------------------------------------------
+
+def trim_specs(dynamics):
+    p = dynamics.params
+    X_hover = dynamics.initial_state()
+    U_hover = np.zeros(8)
+    U_hover[0:4] = p['W_HOVER']
+
+    X_cruise = dynamics.initial_state()
+    X_cruise[0] = 54.0                    # body u at cruise speed
+    U_cruise = np.zeros(8)
+
+    # Warm start for the assisted condition: partial rotor lift + pusher
+    # spinning near its transition operating point.
+    X_assist = X_cruise.copy()
+    X_assist[13:17] = 3000.0              # vertical rotors ~45% hover speed
+    X_assist[17]    = 5000.0              # pusher
+    U_assist = np.zeros(8)
+    U_assist[0:4] = 3000.0 / (44.2205 * 8.18)   # steady-state cmds for w1..w4
+    U_assist[4]   = 5000.0 / (44.2205 * 7.02)   # and w5
+
+    return {
+        'hover': {
+            'X0': X_hover, 'U0': U_hover,
+            'free_states':    ['w1', 'w2', 'w3', 'w4'],
+            'free_controls':  ['m1', 'm2', 'm3', 'm4'],
+            'residual_states': ['u', 'v', 'w', 'p', 'q', 'r',
+                                'w1', 'w2', 'w3', 'w4'],
+        },
+        'cruise': {
+            # Pure wing-borne flight at u = 54 m/s, vertical rotors off:
+            # solve pitch attitude, heave, pusher and elevons for equilibrium.
+            # (Known result: does NOT converge — at 54 m/s the wing is right
+            # at the weight-support boundary, so no in-envelope level trim
+            # exists without rotor assist. This is the root cause of the
+            # cruise-phase sink/crash seen in the full mission.)
+            'X0': X_cruise, 'U0': U_cruise,
+            'free_states':    ['w', 'q0', 'q2', 'w5', 'dl', 'dr'],
+            'free_controls':  ['m5', 'servo_le', 'servo_re'],
+            'residual_states': ['u', 'v', 'w', 'p', 'q', 'r',
+                                'w5', 'dl', 'dr'],
+            'quat_states':    ['q0', 'q1', 'q2', 'q3'],
+        },
+        'cruise_assisted': {
+            # Same condition with the vertical rotors also free — quantifies
+            # how much rotor lift the airframe still needs at 54 m/s.
+            # Bounds keep the solve physical (rotors can't spin backwards,
+            # heave/pitch inside the aero envelope).
+            'X0': X_assist, 'U0': U_assist,
+            'free_states':    ['w', 'q0', 'q2',
+                               'w1', 'w2', 'w3', 'w4', 'w5',
+                               'dl', 'dr', 'drd'],
+            'free_controls':  ['m1', 'm2', 'm3', 'm4', 'm5',
+                               'servo_le', 'servo_re', 'servo_rud'],
+            'residual_states': ['u', 'v', 'w', 'p', 'q', 'r',
+                                'w1', 'w2', 'w3', 'w4', 'w5',
+                                'dl', 'dr', 'drd'],
+            'quat_states':    ['q0', 'q1', 'q2', 'q3'],
+            'bounds': {
+                'w':  (-15.0, 15.0), 'q0': (0.9, 1.0), 'q2': (-0.25, 0.25),
+                'w1': (0.0, 9000.0), 'w2': (0.0, 9000.0),
+                'w3': (0.0, 9000.0), 'w4': (0.0, 9000.0),
+                'w5': (0.0, 9000.0),
+                'm1': (0.0, 1000.0), 'm2': (0.0, 1000.0),
+                'm3': (0.0, 1000.0), 'm4': (0.0, 1000.0),
+                'm5': (0.0, 1000.0),
+                'dl': (-20.0, 20.0), 'dr': (-20.0, 20.0),
+                'drd': (-20.0, 20.0),
+                'servo_le': (-20.0, 20.0), 'servo_re': (-20.0, 20.0),
+                'servo_rud': (-20.0, 20.0),
+            },
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

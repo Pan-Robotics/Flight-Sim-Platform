@@ -141,6 +141,16 @@ class SimRunner:
         _extra_cols = []
         log_rows    = []
 
+        # Wind / disturbances (toggle-able; None = OFF, bit-identical path)
+        wind = None
+        if cfg.wind is not None:
+            from sim.wind import WindModel
+            if hasattr(dyn, 'set_wind_ned'):
+                wind = WindModel(cfg.wind, dt)
+            else:
+                print(f'[WARN] config.wind set but {type(dyn).__name__} has no '
+                      f'set_wind_ned() — wind ignored')
+
         # Envelope validity: latched False on first exit — everything after an
         # envelope exit is model fiction and stays flagged even on re-entry.
         _has_envelope   = hasattr(dyn, 'envelope_violations')
@@ -162,6 +172,12 @@ class SimRunner:
         for i, t in enumerate(time_arr):
             X_hist[i, :] = X
 
+            # Wind: one filter step per integration step, held constant across
+            # the RK4 substeps (zero-order hold).
+            if wind is not None:
+                w_ned = wind.step()
+                dyn.set_wind_ned(w_ned)
+
             # Controller step
             U, info = ctl.step(t, X)
             U_hist[i, :] = U
@@ -176,6 +192,8 @@ class SimRunner:
                                + dyn.state_names
                                + dyn.control_names
                                + _extra_cols
+                               + (['wind_n', 'wind_e', 'wind_d']
+                                  if wind is not None else [])
                                + ['data_valid'])
 
             # Envelope validity check (vehicle-defined)
@@ -220,6 +238,8 @@ class SimRunner:
                 for k in _extra_cols:
                     v = info.get(k, '')
                     row.append(f'{v:.5g}' if isinstance(v, (int, float)) else str(v))
+                if wind is not None:
+                    row += [f'{v:.5g}' for v in w_ned]
                 row.append('1' if _data_valid else '0')
                 log_rows.append(row)
 

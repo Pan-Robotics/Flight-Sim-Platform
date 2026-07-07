@@ -29,7 +29,10 @@ _DATA = os.path.normpath(
                  '..', 'vehicles', 'x4', 'data'))
 
 
-def build():
+def build(overrides=None):
+    """overrides (optional): {'vehicle': {param: val}, 'config': {field: val},
+    'controller': {kwarg: val}} — used by sweeps / Monte Carlo."""
+    ov = overrides or {}
     Adt  = np.loadtxt(os.path.join(_DATA, 'Adt.txt'),  delimiter=',')
     Bdt  = np.loadtxt(os.path.join(_DATA, 'Bdt.txt'),  delimiter=',')
     Cdt  = np.loadtxt(os.path.join(_DATA, 'Cdt.txt'),  delimiter=',')
@@ -61,16 +64,37 @@ def build():
         np.array([0.0,  0.0, -3.0, 0.0]),   # wp3: return
     ]
 
-    dynamics   = X4Dynamics()
-    controller = X4LQGController(
-        Adt, Bdt, Cdt, Kdt, Kidt, Ldt, U_e,
-        ref          = waypoints[0],
-        T_ctrl       = 0.01,
-        max_ref_rate = 0.02,    # 2 m/s max ref ramp rate — keeps attitudes small
-        waypoints    = waypoints,
-        wp_tol       = 0.15,
-    )
+    for k, v in ov.get('config', {}).items():
+        setattr(config, k, v)
+
+    ctl_kw = dict(ref=waypoints[0], T_ctrl=0.01,
+                  max_ref_rate=0.02,   # 2 m/s max ref ramp — keeps attitudes small
+                  waypoints=waypoints, wp_tol=0.15)
+    ctl_kw.update(ov.get('controller', {}))
+
+    # Plant may be perturbed (Monte Carlo); the controller's gains and U_e
+    # stay at the design point — that mismatch is the robustness question.
+    dynamics   = X4Dynamics(params=ov.get('vehicle'))
+    controller = X4LQGController(Adt, Bdt, Cdt, Kdt, Kidt, Ldt, U_e, **ctl_kw)
     return dynamics, controller, config
+
+
+# ---------------------------------------------------------------------------
+# Trim conditions (consumed by analyze_candidate.py)
+# ---------------------------------------------------------------------------
+
+def trim_specs(dynamics):
+    X0 = dynamics.initial_state()
+    U0 = np.full(4, U_e_eq)
+    return {
+        'hover': {
+            'X0': X0, 'U0': U0,
+            'free_states':    ['w1', 'w2', 'w3', 'w4'],
+            'free_controls':  ['m1', 'm2', 'm3', 'm4'],
+            'residual_states': ['xdot', 'ydot', 'zdot', 'p', 'q_ang', 'r',
+                                'w1', 'w2', 'w3', 'w4'],
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

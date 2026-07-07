@@ -76,6 +76,52 @@ candidates; any change that shifts sim behavior fails the suite. After a
 *deliberate* behavior change, re-pin with
 `python tests/test_golden.py --repin` and commit the new numbers with it.
 
+### Disturbances (toggle-able, off by default)
+
+`SimConfig.wind = None` (default) is bit-identical to a windless build.
+Enable constant wind and/or seeded Dryden gusts per run:
+
+```python
+wind = {
+    'constant_ned': [3.0, 0.0, 0.0],                       # steady, NED m/s
+    'dryden': {'V': 5.0, 'sigma': [0.8, 0.8, 0.4],         # gusts (see
+               'L': [50.0, 50.0, 20.0]},                   #  sim/wind.py)
+    'seed': 42,                                            # required w/ dryden
+}
+```
+
+or from the CLI: `--set 'config.wind={constant_ned: [3, 0, 0]}'`.
+Aero/drag act on air-relative flow; envelope checks use air-relative
+alpha/beta; wind history is logged as CSV columns when enabled.
+
+### Sweeps & Monte Carlo
+
+```bash
+python run_sweep.py sweeps/example_x4_dispersion.yaml -j 3
+```
+
+A YAML/JSON spec expands a parameter grid x seeded Monte Carlo dispersions
+(mass, thrust coefficients, ... — see run_sweep.py docstring) into parallel
+runs and produces one `summary.csv` (overrides + verdict + final metrics per
+run) plus `sweep.json` with the verdict histogram and pass rate. Plants are
+perturbed; controllers stay at the design point — the mismatch is what a
+dispersion sweep measures. One-off overrides work on single runs too:
+`python run_candidate.py candidates.x4_lqg --set vehicle.M=0.9`.
+
+### Trim & linearization
+
+```bash
+python analyze_candidate.py candidates.spearhead_vtol
+```
+
+For each condition a candidate declares via `trim_specs()`, solves the
+equilibrium (bounded least-squares), linearizes about it, and reports the
+eigenvalues — answering "is this flight condition an equilibrium, and is it
+stable?" in milliseconds instead of a 180 s sim. Notable built-in result: the
+Spearhead has **no pure wing-borne level trim at 54 m/s** (wing lift equals
+weight with zero margin), which is the root cause of its cruise-phase sink —
+the rotor-assisted trim exists but is open-loop unstable (wn ~ 1.3 rad/s).
+
 ---
 
 ## Core Conventions
