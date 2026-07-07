@@ -4,6 +4,7 @@ Spearhead VTOL — vehicle dynamics.
 Implements the VehicleDynamics interface expected by sim.runner.SimRunner:
   .state_dim, .control_dim, .state_names, .control_names
   .initial_state() -> np.ndarray
+  .get_position(X) -> np.ndarray(3)   NED position (north, east, down)
   .derivatives(t, X, U) -> np.ndarray
   .describe() -> dict
 """
@@ -130,6 +131,10 @@ class SpearheadDynamics:
         X = np.zeros(self.state_dim)
         X[9] = 1.0   # quaternion identity (level, zero heading)
         return X
+
+    def get_position(self, X):
+        """NED position (north, east, down) [m]."""
+        return np.asarray(X[6:9], dtype=float)
 
     def describe(self):
         p = self.params

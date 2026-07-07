@@ -11,6 +11,9 @@ Interfaces (duck-typed):
     .initial_state() -> np.ndarray
     .derivatives(t, X, U) -> np.ndarray   (dXdt)
     .describe()      -> dict               (for log header)
+    .get_position(X) -> np.ndarray(3)      NED (north, east, down) [m]
+                                           (optional; lets the runner report
+                                            position without assuming layout)
 
   Controller:
     .step(t, X) -> (U: np.ndarray, info: dict)
@@ -204,9 +207,11 @@ class SimRunner:
 
             lf.write('\n[END STATE]\n')
             lf.write(f'  t         = {tf:.1f} s\n')
-            if len(X_final) >= 9:
-                lf.write(f'  pos (NED) = ({X_final[6]:.1f}, {X_final[7]:.1f}, {X_final[8]:.1f}) m\n')
-                lf.write(f'  alt AGL   = {-X_final[8]:.2f} m\n')
+            # Ask the vehicle for its NED position — never assume state layout.
+            if hasattr(self.dynamics, 'get_position'):
+                n_pos, e_pos, d_pos = self.dynamics.get_position(X_final)
+                lf.write(f'  pos (NED) = ({n_pos:.1f}, {e_pos:.1f}, {d_pos:.1f}) m\n')
+                lf.write(f'  alt AGL   = {-d_pos:.2f} m\n')
 
             lf.write(f'\n[OUTPUT FILES]\n')
             lf.write(f'  Log : {log_path}\n')

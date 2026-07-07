@@ -4,7 +4,8 @@ X4 Quadcopter — vehicle dynamics for sim_platform.
 Implements the VehicleDynamics interface:
   .state_dim, .control_dim, .state_names, .control_names
   .initial_state() -> np.ndarray (17,)
-  .normalize_state(X) -> np.ndarray   (optional hook, normalises quat at X[6:10])
+  .get_position(X) -> np.ndarray (3,)   NED position (north, east, down)
+  .apply_constraints(X) -> np.ndarray   (normalises quat at X[6:10] + ground clamp)
   .derivatives(t, X, U) -> np.ndarray
   .describe() -> dict
 
@@ -80,6 +81,10 @@ class X4Dynamics:
         X[6]    = 1.0     # identity quaternion (level, north-heading)
         X[13:17] = W_e    # motors at hover equilibrium
         return X
+
+    def get_position(self, X):
+        """NED position (north, east, down) [m]. X4 interleaves pos/vel."""
+        return np.array([X[0], X[2], X[4]])
 
     def apply_constraints(self, X):
         """Quaternion normalisation + ground clamp (z_NED >= 0 = on/below ground)."""
